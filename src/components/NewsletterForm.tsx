@@ -22,21 +22,21 @@ export default function NewsletterForm() {
 
             <div className="gradient text-white py-12">
                 <div className="max-w-7xl mx-auto px-6">
-                    <div className="flex flex-col md:flex-row items-center justify-between">
+                    <div className="flex flex-col md:flex-row items-center justify-between gap-4">
                         {/* Texte à gauche */}
-                        <div className="space-y-3">
+                        <div className="space-y-3 text-center md:text-left">
                             <h2 className="text-xl">Ne manquez pas nos prochains événements</h2>
                             <h3 className="text-xl font-semibold">Abonnez-vous à la newsletter</h3>
                         </div>
 
                         {/* Formulaire à droite */}
-                        <div className="flex gap-4 items-center mt-4 md:mt-0">
+                        <div className="flex flex-col md:flex-row gap-4 items-center w-full md:w-auto">
                             <input
                                 type="email"
                                 placeholder="Votre email"
-                                className="px-4 py-2 rounded-lg text-gray-900 min-w-[300px]"
+                                className="px-4 py-2 rounded-lg text-gray-900 w-full md:min-w-[300px]"
                             />
-                            <button className="bg-white hover:bg-opacity-90 transition-colors text-purple-600 px-6 py-2 rounded-lg font-medium whitespace-nowrap">
+                            <button className="bg-white hover:bg-opacity-90 transition-colors text-purple-600 px-6 py-2 rounded-lg font-medium whitespace-nowrap w-full md:w-auto">
                                 S&apos;INSCRIRE
                             </button>
                         </div>

@@ -1,6 +1,5 @@
 import Image from 'next/image';
 
-import Header from '@/components/Header';
 import Hero from '@/components/Hero';
 import ProgramCard from '@/components/ProgramCard';
 import EventCard from '@/components/EventCard';
@@ -36,7 +35,22 @@ export default function Home() {
       width: 400,
       height: 300
     },
-    // Add more events...
+    {
+      id: '2',
+      title: 'Prix Du Numéro Bla',
+      description: 'Lorem Ipsum is not Simply Random Text. It Has Roots',
+      imageUrl: '/images/exemple.png',
+      width: 400,
+      height: 300
+    },
+    {
+      id: '3',
+      title: 'Prix Du Numéro Bla',
+      description: 'Lorem Ipsum is not Simply Random Text. It Has Roots',
+      imageUrl: '/images/exemple.png',
+      width: 400,
+      height: 300
+    },
   ];
 
   const teamMembers = [
@@ -68,16 +82,13 @@ export default function Home() {
       width: 128,
       height: 128
     },
-    // Add more team members...
   ];
 
   return (
     <main className="min-h-screen">
-      <Header />
       <Hero />
 
       <div className="relative w-full">
-        {/* Top Wave */}
         <div className="w-full h-32 overflow-hidden -mb-1">
           <svg
             className="w-full h-full"
@@ -99,7 +110,6 @@ export default function Home() {
 
         <section className="relative gradient px-6">
           <div className="relative max-w-7xl mx-auto py-16">
-            {/* Robot Placeholder Image */}
             <div className="hidden lg:block absolute left-[calc(-8rem-2vw)] lg:left-[calc(-10rem-5vw)] xl:left-[calc(-12rem-8vw)] top-1/2 transform -translate-y-1/2 w-32 lg:w-40 xl:w-48 aspect-square">
               <Image src="/images/robot.png" alt="Robot mascot" className="w-full h-full object-contain" width={100} height={100} />
             </div>
@@ -121,7 +131,6 @@ export default function Home() {
           </div>
         </section>
 
-        {/* Bottom Wave */}
         <div className="w-full h-32 overflow-hidden -mt-1">
           <svg
             className="w-full h-full"
@@ -142,24 +151,28 @@ export default function Home() {
         </div>
       </div>
 
-      <section>
-        <div className="flex flex-col max-w-7xl mx-auto px-6">
+      <section className="py-8 md:py-12">
+        <div className="flex flex-col max-w-7xl mx-auto px-4 md:px-6">
           <Image
             src="/images/robot-mascotte-1.png"
             alt="Events"
             width={150}
             height={150}
-            className="mb-12 mx-auto"
+            className="w-24 md:w-32 lg:w-36 mb-8 md:mb-12 mx-auto"
           />
-          <h2 className="text-3xl font-bold mb-12 text-center text-[#333333]">QUELQUES ÉVÉNEMENTS MARQUANT</h2>
-          {events.map(event => (
-            <EventCard key={event.id} event={event} />
-          ))}
+          <h2 className="text-2xl md:text-3xl font-bold mb-8 md:mb-12 text-center text-[#333333]">
+            QUELQUES ÉVÉNEMENTS MARQUANT
+          </h2>
+          <div className="space-y-4 md:space-y-6">
+            {events.map(event => (
+              <EventCard key={event.id} event={event} />
+            ))}
+          </div>
         </div>
       </section>
 
       <div className="relative w-full">
-        <div className="w-full h-32 overflow-hidden">
+        <div className="w-full h-24 md:h-32 overflow-hidden -mb-1">
           <svg className="w-full h-full" viewBox="0 0 1440 200" preserveAspectRatio="none">
             <defs>
               <linearGradient id="waveGradient3" x1="100%" y1="50%" x2="0%" y2="50%">
@@ -171,28 +184,29 @@ export default function Home() {
           </svg>
         </div>
 
-        <section className="gradient px-6 py-16">
+        <section className="gradient px-4 md:px-6 py-8 md:py-16">
           <div className="max-w-7xl mx-auto">
-            <h2 className="text-white text-2xl md:text-3xl font-bold mb-12 text-center max-w-4xl mx-auto">
+            <h2 className="text-white text-xl md:text-3xl font-bold mb-8 md:mb-12 text-center max-w-4xl mx-auto px-4">
               VOUS ÊTES PASSIONNÉ PAR LE NUMÉRIQUE ET SOUHAITEZ FAIRE PARTIE D&apos;UNE COMMUNAUTÉ DYNAMIQUE ET INCLUSIVE ?
             </h2>
 
-            <div className="flex px-12 items-center font-bold">
-              <div className="flex justify-center md:justify-end">
+            <div className="flex flex-col md:flex-row px-4 md:px-12 items-center font-bold gap-8">
+              <div className="order-2 md:order-1 md:w-1/2">
                 <Image
                   src="/images/robot-mascotte-2.png"
                   alt="Robot mascot"
-                  width={500}
-                  height={500}
-                  className="w-7xl"
+                  width={5000}
+                  height={5000}
+                  className="w-full max-w-sm mx-auto"
+                  priority
                 />
               </div>
-              <div>
-                <p className="text-white md:text-left text-center pr-24 text-lg">
+              <div className="order-1 md:order-2 md:w-1/2">
+                <p className="text-white text-center md:text-left text-base md:text-lg">
                   Devenez membre de DIGIZELLE et participez à nos événements, formations et projets innovants ! Ensemble, inspirons et soutenons les jeunes talents dans leur parcours digital. N&apos;attendez plus, rejoignez-nous et faites la différence !
                 </p>
-                <div className="flex justify-center md:justify-start mt-8">
-                  <button className="bg-white text-purple-600 px-8 py-3 rounded-md font-medium hover:bg-opacity-90 transition-colors">
+                <div className="flex justify-center md:justify-start mt-6 md:mt-8">
+                  <button className="bg-white text-purple-600 px-6 md:px-8 py-2 md:py-3 rounded-md font-medium hover:bg-opacity-90 transition-colors">
                     REJOIGNEZ-NOUS
                   </button>
                 </div>
@@ -201,7 +215,7 @@ export default function Home() {
           </div>
         </section>
 
-        <div className="w-full h-32 overflow-hidden -mt-1">
+        <div className="w-full h-24 md:h-32 overflow-hidden -mt-1">
           <svg
             className="w-full h-full"
             viewBox="0 0 1440 320"
@@ -224,7 +238,7 @@ export default function Home() {
       <section className="py-16">
         <div className="max-w-7xl mx-auto px-6">
           <h2 className="text-3xl font-bold mb-12 text-center text-[#333333]">NOTRE ÉQUIPE</h2>
-          <div className="grid grid-cols-4 gap-8">
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-8">
             {teamMembers.map((member, index) => (
               <TeamMemberCard key={index} member={member} />
             ))}
