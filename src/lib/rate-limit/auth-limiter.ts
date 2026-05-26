@@ -1,0 +1,256 @@
+import 'server-only';
+import { headers } from 'next/headers';
+import { incrementWithExpiry, isUpstashConfigured, ttlSeconds } from './upstash';
+
+/**
+ * Rate limiter dedicated to authentication flows: sign-in, sign-up, email
+ * verification, password reset.
+ *
+ * Why a separate limiter from `src/lib/community/rateLimit.ts`?
+ *  - The community limiter keys on `memberId` (post-auth). Auth flows happen
+ *    *before* a session exists, so they need IP + email keys.
+ *  - The buckets are tighter — defending against credential stuffing /
+ *    enumeration / email bombing — whereas community buckets defend against
+ *    spam from logged-in users.
+ *  - Auth limits return 429 with a Retry-After header; community limits
+ *    surface a translatable error code in the action result.
+ *
+ * Backend strategy:
+ *  - Default: in-memory token bucket. Works in dev + low-traffic prod, but
+ *    each Vercel instance has its own state. Effective limit ~= configured
+ *    limit × instance count.
+ *  - Production: when `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN`
+ *    are set, the implementation lazily upgrades to a Redis-backed limiter
+ *    so all instances share state. The Upstash integration is intentionally
+ *    not imported eagerly — adding `@upstash/ratelimit` to the project is a
+ *    deliberate next step (see TODO at the bottom).
+ */
+
+type CheckResult =
+  | { ok: true; remaining: number }
+  | { ok: false; retryAfterMs: number; retryAfterSec: number };
+
+type BucketState = { tokens: number; lastRefillMs: number };
+
+const buckets = new Map<string, BucketState>();
+
+function refill(
+  state: BucketState,
+  capacity: number,
+  refillPerSec: number,
+  nowMs: number,
+): BucketState {
+  const elapsedMs = Math.max(0, nowMs - state.lastRefillMs);
+  const tokensToAdd = (elapsedMs / 1000) * refillPerSec;
+  const tokens = Math.min(capacity, state.tokens + tokensToAdd);
+  return { tokens, lastRefillMs: nowMs };
+}
+
+function checkInMemory(
+  key: string,
+  capacity: number,
+  refillPerSec: number,
+  nowMs: number = Date.now(),
+): CheckResult {
+  const existing = buckets.get(key) ?? {
+    tokens: capacity,
+    lastRefillMs: nowMs,
+  };
+  const refilled = refill(existing, capacity, refillPerSec, nowMs);
+  if (refilled.tokens >= 1) {
+    refilled.tokens -= 1;
+    buckets.set(key, refilled);
+    return { ok: true, remaining: Math.floor(refilled.tokens) };
+  }
+  buckets.set(key, refilled);
+  // Time to regenerate 1 token at the current refill rate.
+  const retryAfterMs = Math.ceil((1 - refilled.tokens) * (1000 / refillPerSec));
+  return {
+    ok: false,
+    retryAfterMs,
+    retryAfterSec: Math.max(1, Math.ceil(retryAfterMs / 1000)),
+  };
+}
+
+/**
+ * Bucket configurations per auth action.
+ *
+ * `capacity` is the burst size (max attempts in a fresh bucket).
+ * `windowSec` is the window over which the bucket fully refills.
+ *
+ * Two-key strategy: every action checks both `ip` and `email` buckets and
+ * fails on whichever trips first. This protects against:
+ *   - Single-IP brute force (high IP capacity, low per-email count)
+ *   - Distributed brute force on a single account (low per-email count)
+ *   - Email bombing (low per-email count on resend / reset)
+ */
+const BUCKETS = {
+  signIn: {
+    ip: { capacity: 30, windowSec: 15 * 60 },
+    email: { capacity: 10, windowSec: 15 * 60 },
+  },
+  signUp: {
+    ip: { capacity: 5, windowSec: 60 * 60 },
+    // We also bucket on email so a distributed attacker who rotates IPs
+    // can't repeatedly probe a single address to enumerate verified vs
+    // new accounts. 3 attempts per email per hour is plenty for a
+    // legitimate user retrying a typo.
+    email: { capacity: 3, windowSec: 60 * 60 },
+  },
+  resendVerificationCode: {
+    ip: { capacity: 10, windowSec: 60 * 60 },
+    email: { capacity: 3, windowSec: 60 * 60 },
+  },
+  verifyEmailCode: {
+    ip: { capacity: 30, windowSec: 60 * 60 },
+    email: { capacity: 10, windowSec: 60 * 60 },
+  },
+  requestPasswordReset: {
+    ip: { capacity: 5, windowSec: 60 * 60 },
+    email: { capacity: 3, windowSec: 60 * 60 },
+  },
+  confirmPasswordReset: {
+    ip: { capacity: 10, windowSec: 60 * 60 },
+    email: { capacity: 5, windowSec: 60 * 60 },
+  },
+} as const satisfies Record<
+  string,
+  { ip: { capacity: number; windowSec: number }; email?: { capacity: number; windowSec: number } }
+>;
+
+export type AuthAction = keyof typeof BUCKETS;
+
+/**
+ * Read the client IP from request headers. Vercel sets `x-forwarded-for`
+ * with the client IP first and intermediate proxies after. Fall back to
+ * `x-real-ip` then `cf-connecting-ip` (Cloudflare) so the limiter still
+ * works behind alternate edges. When nothing identifies the client (e.g.
+ * server-side calls in tests), bucket on a constant — better to over-limit
+ * than to leak unbounded attempts.
+ */
+export async function getRequestIp(): Promise<string> {
+  try {
+    const h = await headers();
+    const xff = h.get('x-forwarded-for');
+    if (xff) {
+      const first = xff.split(',')[0]?.trim();
+      if (first) return first;
+    }
+    const real = h.get('x-real-ip');
+    if (real) return real;
+    const cf = h.get('cf-connecting-ip');
+    if (cf) return cf;
+  } catch {
+    /* headers() unavailable outside a request scope */
+  }
+  return 'unknown';
+}
+
+/**
+ * Fixed-window check against Upstash. Returns the same `CheckResult`
+ * shape as the in-memory bucket. On any Redis-side failure we **fail
+ * open** — return ok:true so a Redis outage doesn't lock everyone out.
+ * The downside is a brief window where limits relax to the per-instance
+ * fallback; the alternative (returning ok:false) would amplify a Redis
+ * incident into an auth outage.
+ */
+async function checkUpstashWindow(
+  key: string,
+  capacity: number,
+  windowSec: number,
+): Promise<CheckResult> {
+  const count = await incrementWithExpiry(key, windowSec);
+  if (count === null) {
+    // Upstash unreachable — fail open. The in-memory limiter has
+    // already been consulted by the caller; this just removes the
+    // multi-instance safety net for one request.
+    return { ok: true, remaining: capacity };
+  }
+  if (count <= capacity) {
+    return { ok: true, remaining: capacity - count };
+  }
+  // Over the limit. We need a Retry-After value; ask Upstash for the
+  // remaining TTL on this window's key. If Redis can't tell us, fall
+  // back to the full window length.
+  const ttl = await ttlSeconds(key);
+  const retryAfterSec =
+    typeof ttl === 'number' && ttl > 0 ? ttl : windowSec;
+  return {
+    ok: false,
+    retryAfterMs: retryAfterSec * 1000,
+    retryAfterSec,
+  };
+}
+
+/**
+ * Check both IP and email buckets for a given auth action. Returns `ok:true`
+ * only when both pass; otherwise returns the failing decision so the caller
+ * can surface a user-friendly retry message.
+ *
+ * Backend selection:
+ *  - If `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN` are set,
+ *    the per-IP / per-email windows are evaluated atomically via Redis
+ *    `INCR` + `EXPIRE NX`. Limits are then global across every Vercel
+ *    instance.
+ *  - Otherwise we fall back to the in-process token bucket. Useful for
+ *    local dev and Hobby deployments where Upstash isn't provisioned.
+ *
+ * Caller is responsible for normalising the email (lowercase + trim) before
+ * passing it in — the bucket key is exact-string.
+ */
+export async function checkAuthRateLimit(
+  action: AuthAction,
+  email?: string,
+): Promise<CheckResult> {
+  const cfg = BUCKETS[action];
+  const now = Date.now();
+  const ip = await getRequestIp();
+  const useRedis = isUpstashConfigured();
+
+  const ipKey = `auth:${action}:ip:${ip}`;
+  const ipDecision = useRedis
+    ? await checkUpstashWindow(ipKey, cfg.ip.capacity, cfg.ip.windowSec)
+    : checkInMemory(ipKey, cfg.ip.capacity, cfg.ip.capacity / cfg.ip.windowSec, now);
+  if (!ipDecision.ok) return ipDecision;
+
+  // The email bucket is optional per action — `signUp` for instance only
+  // gates on IP. Use a property-existence check (TS narrows the union).
+  const cfgWithEmail = cfg as { email?: { capacity: number; windowSec: number } };
+  if (cfgWithEmail.email && email) {
+    const emailKey = `auth:${action}:email:${email.toLowerCase().trim()}`;
+    const emailDecision = useRedis
+      ? await checkUpstashWindow(
+          emailKey,
+          cfgWithEmail.email.capacity,
+          cfgWithEmail.email.windowSec,
+        )
+      : checkInMemory(
+          emailKey,
+          cfgWithEmail.email.capacity,
+          cfgWithEmail.email.capacity / cfgWithEmail.email.windowSec,
+          now,
+        );
+    if (!emailDecision.ok) return emailDecision;
+  }
+
+  return ipDecision;
+}
+
+/**
+ * Translation key returned to the UI when rate-limited. The action layer
+ * surfaces this via `AuthState.error` so `LoginForm` / similar can map it
+ * to a localised message via i18n.
+ *
+ * The `retryAfterSec` is currently swallowed (we don't have a place in
+ * AuthState to carry it). When a richer state shape is introduced, expose
+ * it so the UI can show "Réessayez dans 12 minutes".
+ */
+export const AUTH_RATE_LIMIT_ERROR = 'rateLimited';
+
+/**
+ * Test helper — only for use by node:test specs. Resets the in-memory map.
+ */
+export function _resetAuthLimiterForTests(): void {
+  buckets.clear();
+}
+

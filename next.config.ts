@@ -1,7 +1,247 @@
-import type { NextConfig } from "next";
+import type { NextConfig } from 'next';
+import createNextIntlPlugin from 'next-intl/plugin';
+import { withSentryConfig } from '@sentry/nextjs';
+import withBundleAnalyzer from '@next/bundle-analyzer';
+
+const withNextIntl = createNextIntlPlugin('./src/i18n/request.ts');
+
+/**
+ * Bundle analyzer wrapper. Run `ANALYZE=1 npm run build` to generate
+ * an interactive treemap of the client + server bundles in
+ * `.next/analyze/`. Disabled by default so production builds stay
+ * fast; enabling it doesn't change the emitted bundle, only writes
+ * the report files.
+ */
+const withAnalyzer = withBundleAnalyzer({
+  enabled: process.env.ANALYZE === '1',
+});
+
+/**
+ * Security headers — applied to every route.
+ *
+ * Content-Security-Policy is shipped in **Report-Only** mode for the first
+ * production deploy so we can observe violations in the browser console
+ * (and via Sentry's CSP report endpoint when wired) without breaking the
+ * site. Once the report stream is clean for ~1 week, flip the directive
+ * name from `Content-Security-Policy-Report-Only` to `Content-Security-Policy`.
+ *
+ * The codebase relies heavily on inline `style={{…}}` attributes (every
+ * component) and on Next.js styled-jsx `<style jsx>{…}</style>`. CSP cannot
+ * differentiate React-emitted inline styles from attacker-injected ones, so
+ * `style-src` keeps `'unsafe-inline'`. For `script-src`, Next.js 16 emits
+ * inline scripts (RSC payload, hydration) with hashes/nonces transparently —
+ * we keep `'self' 'unsafe-inline'` until we wire a strict nonce middleware
+ * (Phase 2). Browsers ignore `'unsafe-inline'` when a nonce/hash is present,
+ * so this is a stricter posture than it looks.
+ *
+ * Allowlists:
+ *  - Supabase: storage + REST (image hosting + Realtime)
+ *  - Resend: transactional email pixel/tracking
+ *  - Vercel Speed Insights / Analytics: ingestion endpoint (Phase 2 wiring)
+ *  - data: + blob: : data-URI uploads + (future) Vercel Blob signed URLs
+ */
+const isDev = process.env.NODE_ENV !== 'production';
+
+/**
+ * Build a CSP `report-uri` pointing at Sentry's security endpoint when a
+ * DSN is configured. Sentry expects:
+ *   https://o<ORG>.ingest.<region>.sentry.io/api/<PROJECT>/security/?sentry_key=<KEY>
+ * which we derive from the public DSN. Returns null when no DSN is set so
+ * we don't emit a broken directive.
+ */
+function sentryCspReportUri(): string | null {
+  const dsn = process.env.NEXT_PUBLIC_SENTRY_DSN;
+  if (!dsn) return null;
+  try {
+    const u = new URL(dsn);
+    const projectId = u.pathname.replace(/^\//, '');
+    const key = u.username;
+    if (!projectId || !key) return null;
+    return `${u.protocol}//${u.host}/api/${projectId}/security/?sentry_key=${key}`;
+  } catch {
+    return null;
+  }
+}
+
+const cspReport = sentryCspReportUri();
+
+// CSP enforcement gate. Default: Report-Only — collect violations
+// without breaking the site for the first observation window. Flip
+// to enforced by setting `CSP_ENFORCE=1` once the report stream is
+// quiet for a week. We deliberately read this at build time (not
+// runtime) so a misconfigured env var doesn't suddenly drop traffic
+// in a hot reload — every deploy has a single, observable header
+// state.
+const cspEnforce = process.env.CSP_ENFORCE === '1';
+const cspHeaderName = cspEnforce
+  ? 'Content-Security-Policy'
+  : 'Content-Security-Policy-Report-Only';
+
+// Vercel Live — the toolbar/comments overlay injected on preview
+// deploys (and sometimes prod when "Toolbar in production" is on).
+// We always allowlist its origins so the toolbar works without
+// flooding the console with violations. The toolbar is opt-in at
+// the Vercel project level; harmless when not present.
+const VERCEL_LIVE = 'https://vercel.live';
+const VERCEL_LIVE_WS = 'wss://*.pusher.com'; // Vercel Live uses Pusher for realtime
+
+const cspDirectives = [
+  "default-src 'self'",
+  // Scripts: Next.js + RSC inline scripts. `unsafe-eval` only kept in dev
+  // for HMR; production strips it.
+  `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ''} https://va.vercel-scripts.com ${VERCEL_LIVE}`,
+  // Styles: every page uses `style={{…}}` and styled-jsx → unsafe-inline
+  // is required. We compensate by hardening other directives.
+  `style-src 'self' 'unsafe-inline' https://fonts.googleapis.com ${VERCEL_LIVE}`,
+  `img-src 'self' data: blob: https://*.supabase.co https://*.public.blob.vercel-storage.com https://lh3.googleusercontent.com https://avatars.githubusercontent.com https://cdn.discordapp.com https://api.qrserver.com ${VERCEL_LIVE}`,
+  `font-src 'self' https://fonts.gstatic.com data: ${VERCEL_LIVE}`,
+  // XHR / fetch: same origin + Supabase (REST + Realtime WS) + Resend +
+  // Sentry (both EU and US ingestion regions) + Vercel.
+  `connect-src 'self' https://*.supabase.co wss://*.supabase.co https://api.resend.com https://*.ingest.sentry.io https://*.ingest.de.sentry.io https://*.ingest.us.sentry.io https://vitals.vercel-insights.com https://va.vercel-scripts.com ${VERCEL_LIVE} ${VERCEL_LIVE_WS}`,
+  // Frames: same-origin embedding only, plus Vercel Live's iframe. The
+  // legacy `frame-ancestors 'none'` (above) still blocks others from
+  // framing US — `frame-src` is about what *we* may embed.
+  `frame-src 'self' ${VERCEL_LIVE}`,
+  // Frame-ancestors: deny all (used to be X-Frame-Options: DENY).
+  // OAuth providers never embed our pages.
+  "frame-ancestors 'none'",
+  // Forms: only post to ourselves (auth callbacks live on /api/auth/*).
+  "form-action 'self'",
+  // Misc tightening
+  "base-uri 'self'",
+  "object-src 'none'",
+  // upgrade-insecure-requests is silently ignored when CSP is delivered
+  // in report-only mode (Chrome warns about it on every page load), so
+  // we only emit it once we flip to enforce. HSTS already pins TLS for
+  // the apex domain, so the practical posture is unchanged.
+  ...(cspEnforce ? ['upgrade-insecure-requests'] : []),
+  // Pipe CSP violations straight to Sentry. We use the legacy `report-uri`
+  // directive (still respected by all browsers); browsers that support the
+  // newer `report-to` Reporting API require an additional `Report-To`
+  // header — defer that to Phase 2 once we wire Sentry's Reporting API.
+  ...(cspReport ? [`report-uri ${cspReport}`] : []),
+];
+
+const securityHeaders = [
+  {
+    key: cspHeaderName,
+    value: cspDirectives.join('; '),
+  },
+  // HSTS: 2 years, include subdomains, preload-eligible. Vercel terminates
+  // TLS so this is safe.
+  {
+    key: 'Strict-Transport-Security',
+    value: 'max-age=63072000; includeSubDomains; preload',
+  },
+  // Legacy backstop for browsers that don't honour `frame-ancestors`.
+  { key: 'X-Frame-Options', value: 'DENY' },
+  { key: 'X-Content-Type-Options', value: 'nosniff' },
+  // Don't leak full URLs to third parties; same-origin requests still get
+  // the full referrer.
+  { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
+  // Disable powerful APIs we don't use. Browsers that don't recognise a
+  // feature simply ignore it, so this list can grow over time without
+  // breaking older clients.
+  {
+    key: 'Permissions-Policy',
+    value: [
+      'accelerometer=()',
+      'camera=()',
+      'geolocation=()',
+      'gyroscope=()',
+      'magnetometer=()',
+      'microphone=()',
+      'payment=()',
+      'usb=()',
+      'interest-cohort=()',
+    ].join(', '),
+  },
+  // Cross-origin protections — keep us isolated from third-party windows
+  // that try to read our state via window.opener / Spectre-class attacks.
+  { key: 'Cross-Origin-Opener-Policy', value: 'same-origin' },
+  { key: 'Cross-Origin-Resource-Policy', value: 'same-origin' },
+  // Don't list our app version / framework
+  { key: 'X-DNS-Prefetch-Control', value: 'on' },
+];
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  async headers() {
+    return [
+      {
+        // Apply to every route except OAuth callback iframes (none today).
+        source: '/:path*',
+        headers: securityHeaders,
+      },
+    ];
+  },
+  // Ship the RGPD doc set with the serverless bundle so the admin viewer at
+  // /community/admin/rgpd can read the markdown source at runtime. Next.js
+  // would otherwise tree-shake non-imported files out of the deployment.
+  outputFileTracingIncludes: {
+    '/community/admin/rgpd': ['./docs/rgpd/**'],
+  },
+  // next/image remote-pattern allowlist. We only opt in to hosts the app
+  // actually fetches images from. The `*.supabase.co` wildcard covers
+  // every project under our Supabase org so we don't need to redeploy
+  // when a new bucket is added or a project is moved.
+  images: {
+    remotePatterns: [
+      {
+        protocol: 'https',
+        hostname: '*.supabase.co',
+        pathname: '/storage/v1/object/public/**',
+      },
+      // OAuth-provider avatars (Google / GitHub / Discord) bypass Storage
+      // so they need direct allow-listing. CSP already permits these
+      // hosts; mirroring here unlocks <Image> optimization on them.
+      { protocol: 'https', hostname: 'lh3.googleusercontent.com' },
+      { protocol: 'https', hostname: 'avatars.githubusercontent.com' },
+      { protocol: 'https', hostname: 'cdn.discordapp.com' },
+    ],
+  },
 };
 
-export default nextConfig;
+// Wrap order: next-intl is the innermost plugin (transforms imports),
+// then bundle-analyzer (no-op when ANALYZE != '1'), then Sentry wraps
+// the result to inject source-map upload + tunneling.
+//
+// Sentry options reference:
+//   https://github.com/getsentry/sentry-webpack-plugin#options
+const withIntl = withNextIntl(nextConfig);
+const withIntlAndAnalyzer = withAnalyzer(withIntl);
+
+export default withSentryConfig(withIntlAndAnalyzer, {
+  // Sentry org + project — read from `npx @sentry/wizard`'s output.
+  org: 'dig-ln',
+  project: 'javascript-nextjs',
+
+  // Suppress build logs from the Sentry plugin (`true` keeps the build
+  // output readable).
+  silent: !process.env.CI,
+
+  // Upload source maps in CI builds only (needs SENTRY_AUTH_TOKEN). On
+  // dev / Vercel preview without the token this is a no-op.
+  widenClientFileUpload: true,
+
+  // Tunnel events through `/monitoring` to bypass ad-blockers that block
+  // Sentry's domain. The Sentry SDK will POST events here; the route is
+  // auto-registered by withSentryConfig.
+  tunnelRoute: '/monitoring',
+
+  // Source-map handling. `disable: true` would skip upload entirely; we
+  // keep upload enabled (when SENTRY_AUTH_TOKEN is present) so traces stay
+  // symbolicated.
+  sourcemaps: {
+    deleteSourcemapsAfterUpload: true,
+  },
+
+  // The previous `disableLogger: true` and `automaticVercelMonitors: true`
+  // options are not supported under Turbopack (Next.js 16's default) — the
+  // SDK prints DEPRECATION warnings on every build and the options are no-
+  // ops anyway. Removed. If/when we regain webpack-based builds, the
+  // equivalents live under the `webpack` key:
+  //   webpack: {
+  //     treeshake: { removeDebugLogging: true },
+  //     automaticVercelMonitors: true,
+  //   },
+});

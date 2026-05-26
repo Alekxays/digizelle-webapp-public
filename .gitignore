@@ -32,6 +32,8 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+# But always commit the example template so new contributors know what to fill.
+!.env.example
 
 # vercel
 .vercel
@@ -39,3 +41,15 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Claude Code workspace (local agent settings, specs, scheduled tasks)
+.claude/
+
+# Anthropic skills bundles (tooling cache, not part of the app)
+/skills/
+
+# RGPD — instantiated DPA contracts and AIPD drafts containing signatures
+# or third-party identifiers are kept out of the repo. Templates and the
+# registry stay committed.
+docs/rgpd/dpa/
+docs/rgpd/aipd-*.draft.md
